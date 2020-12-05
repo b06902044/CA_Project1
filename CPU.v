@@ -22,15 +22,15 @@ PC PC(
 );
 
 wire [31 : 0] pc_add4;
-Adder Adder(
+Add4 Add4(
     .pc_i(pc_o),
     .pc_o(pc_add4)
 );
 
 MUX32 PC_Mux (
     .input0(pc_add4),
-    .input1(),
-    .ctrl_signal(1'b0),
+    .input1(PC_Branch),
+    .ctrl_signal(Flush),
     .out(pc_i)
 );
 
@@ -46,8 +46,13 @@ Instruction_Memory Instruction_Memory
 reg [31 : 0] IF_ID_IR, IF_ID_PC;
 
 always @(posedge clk_i) begin
+    //if Stall => keep IF / ID register
     if(Stall == 0) begin
-        if(instr) begin
+        if(Flush) begin
+            IF_ID_IR <= 0;
+            IF_ID_PC <= 0;
+        end
+        else if(instr) begin
             IF_ID_IR <=  instr;
             IF_ID_PC <= pc_o;
         end     
@@ -56,22 +61,21 @@ end
 
 // ID stage
 
-wire [4: 0] rs1_addr, rs2_addr, rd_addr;
-wire [6 : 0] opcode;
-wire [2 : 0] func3;
-wire [6 : 0] func7;
-wire [11 : 0] imm_i;
+wire [4: 0]     rs1_addr, rs2_addr, rd_addr;
+wire [6 : 0]    opcode, func7;
+wire [2 : 0]    func3;
+wire [11 : 0]   imm_i;
 
-assign opcode = IF_ID_IR[6 : 0];
-assign rd_addr = (opcode == `sw || opcode == `beq)? 5'b0 : IF_ID_IR[11 : 7];
-assign func3 = IF_ID_IR[14 : 12];
-assign rs1_addr = IF_ID_IR[19 : 15];
-assign rs2_addr = (opcode == `lw || opcode == `imm)? 5'b0 : IF_ID_IR[24 : 20];
-assign func7 =  IF_ID_IR[31 : 25];
-assign imm_i =  (opcode == `lw)? IF_ID_IR[31 : 20] : 
-                (opcode == `sw)? {IF_ID_IR[31 : 25], IF_ID_IR[11 : 7]} : 
-                (opcode == `beq)? {IF_ID_IR[31], IF_ID_IR[7], IF_ID_IR[30 : 25], IF_ID_IR[11 : 8]} : 
-                (func3 == 3'b000)?  IF_ID_IR[31 : 20] : IF_ID_IR[24 : 20];
+assign opcode   =   IF_ID_IR[6 : 0];
+assign rd_addr  =   (opcode == `sw || opcode == `beq)? 0 : IF_ID_IR[11 : 7];
+assign func3    =   IF_ID_IR[14 : 12];
+assign rs1_addr =   IF_ID_IR[19 : 15];
+assign rs2_addr =   (opcode == `lw || opcode == `imm)? 0 : IF_ID_IR[24 : 20];
+assign func7    =   IF_ID_IR[31 : 25];
+assign imm_i    =   (opcode == `lw)?    IF_ID_IR[31 : 20] : 
+                    (opcode == `sw)?    {IF_ID_IR[31 : 25], IF_ID_IR[11 : 7]} : 
+                    (opcode == `beq)?   {IF_ID_IR[31], IF_ID_IR[7], IF_ID_IR[30 : 25], IF_ID_IR[11 : 8]} : 
+                    (func3 == 3'b000)?  IF_ID_IR[31 : 20] : IF_ID_IR[24 : 20];
 
 wire Stall, NoOp;
 Hazard_Detection Hazard_Detection (
@@ -83,13 +87,6 @@ Hazard_Detection Hazard_Detection (
     .Stall_o(Stall), 
     .NoOp_o(NoOp) 
 );
-
-always @(posedge clk_i) begin
-    $display("if_id_ir = %b opcode = %b rd = %d", IF_ID_IR, opcode, rd_addr);
-    $display("rs1 = %d rs2 = %d rd = %d memread = %d pcWrite = %d stall = %d noop = %d", 
-              rs1_addr, rs2_addr, ID_EX_RD, ID_EX_MemRead, PcWrite, Stall, NoOp);
-end
-
 
 wire [31: 0] rs1_data, rs2_data;
 Registers Registers
@@ -124,54 +121,41 @@ Sign_Extend Sign_Extend(
     .imm_o(imm_o)
 );
 
+wire [31 : 0] PC_Branch;
+Adder Adder(
+    .IF_ID_PC(IF_ID_PC),
+    .IF_ID_Imm(imm_o),
+    .PC_Branch(PC_Branch)
+);
+
+wire Flush;
+assign Flush = ((rs1_data == rs2_data) && Branch)? 1 : 0; 
+
 // ID / EX pipeline register
 
-reg [31 : 0] ID_EX_RS1data, ID_EX_RS2data, ID_EX_IMM, ID_EX_PC;
+reg [31 : 0] ID_EX_RS1data, ID_EX_RS2data, ID_EX_IMM;
 reg [4 : 0]  ID_EX_RD, ID_EX_RS1, ID_EX_RS2;
 reg [6 : 0]  ID_EX_func7;
 reg [2 : 0]  ID_EX_func3;
 reg [1 : 0]  ID_EX_AluOp;
-reg          ID_EX_AluSrc, ID_EX_RegWrite, ID_EX_MemtoReg, ID_EX_MemRead, ID_EX_MemWrite, ID_EX_Branch;
+reg          ID_EX_AluSrc, ID_EX_RegWrite, ID_EX_MemtoReg, ID_EX_MemRead, ID_EX_MemWrite;
 
 
 always @(posedge clk_i) begin
-    if(rd_addr)     ID_EX_RD <= rd_addr;
-    else            ID_EX_RD <= 0;
-    if(rs1_addr)    ID_EX_RS1       <= rs1_addr;
-    else            ID_EX_RS1       <= 0;
-    if(rs2_addr)    ID_EX_RS2       <= rs2_addr;
-    else            ID_EX_RS2       <= 0;
-    if (rs1_data)   ID_EX_RS1data   <= rs1_data;
-    else            ID_EX_RS1data   <= 0;
-    if(rs2_data)    ID_EX_RS2data   <= rs2_data;
-    else            ID_EX_RS2data   <= 0;
-    if(imm_o)       ID_EX_IMM       <= imm_o;
-    else            ID_EX_IMM       <= 0;
-    if(IF_ID_PC)    ID_EX_PC        <= IF_ID_PC;
-    else            ID_EX_PC        <= 0;
-    if(func7)       ID_EX_func7     <= func7;
-    else            ID_EX_func7     <= 0;
-    if(func3)       ID_EX_func3     <= func3;
-    else            ID_EX_func3     <= 0;
-    if(AluOp)       ID_EX_AluOp     <= AluOp;
-    else            ID_EX_AluOp     <= 0;
-    if(AluSrc)      ID_EX_AluSrc    <= AluSrc;
-    else            ID_EX_AluSrc    <= 0;
-    if(RegWrite)    ID_EX_RegWrite  <= RegWrite;
-    else            ID_EX_RegWrite  <= 0;
-    if(MemtoReg)    ID_EX_MemtoReg  <= MemtoReg;
-    else            ID_EX_MemtoReg  <= 0;
-    if(MemRead)     ID_EX_MemRead   <= MemRead;
-    else            ID_EX_MemRead   <= 0;
-    if(MemWrite)    ID_EX_MemWrite  <= MemWrite;
-    else            ID_EX_MemWrite  <= 0;
-    if(Branch)      ID_EX_Branch    <= Branch;
-    else            ID_EX_Branch    <= 0;
-end
-
-always @(posedge clk_i) begin
-    $display("rd = %d rs1 = %d rs2 = %d rs1data = %d rs2data = %d aluop = %d alusrc = %d regwr = %d memtoreg = %d memread = %d memwrite = %d\n", 
-    ID_EX_RD, ID_EX_RS1, ID_EX_RS2 ,ID_EX_RS1data , ID_EX_RS2data  ,ID_EX_AluOp    ,ID_EX_AluSrc   ,ID_EX_RegWrite ,ID_EX_MemtoReg ,ID_EX_MemRead  ,ID_EX_MemWrite);
+    if(rd_addr)     ID_EX_RD        <= rd_addr;     else    ID_EX_RD        <= 0;
+    if(rs1_addr)    ID_EX_RS1       <= rs1_addr;    else    ID_EX_RS1       <= 0;
+    if(rs2_addr)    ID_EX_RS2       <= rs2_addr;    else    ID_EX_RS2       <= 0;
+    if (rs1_data)   ID_EX_RS1data   <= rs1_data;    else    ID_EX_RS1data   <= 0;
+    if(rs2_data)    ID_EX_RS2data   <= rs2_data;    else    ID_EX_RS2data   <= 0;
+    if(imm_o)       ID_EX_IMM       <= imm_o;       else    ID_EX_IMM       <= 0;
+    if(func7)       ID_EX_func7     <= func7;       else    ID_EX_func7     <= 0;
+    if(func3)       ID_EX_func3     <= func3;       else    ID_EX_func3     <= 0;
+    if(AluOp)       ID_EX_AluOp     <= AluOp;       else    ID_EX_AluOp     <= 0;
+    if(AluSrc)      ID_EX_AluSrc    <= AluSrc;      else    ID_EX_AluSrc    <= 0;
+    if(RegWrite)    ID_EX_RegWrite  <= RegWrite;    else    ID_EX_RegWrite  <= 0;
+    if(MemtoReg)    ID_EX_MemtoReg  <= MemtoReg;    else    ID_EX_MemtoReg  <= 0;
+    if(MemRead)     ID_EX_MemRead   <= MemRead;     else    ID_EX_MemRead   <= 0;
+    if(MemWrite)    ID_EX_MemWrite  <= MemWrite;    else    ID_EX_MemWrite  <= 0;
 end
 
 // EX stage
@@ -232,25 +216,16 @@ ALU ALU(
 
 reg [31 : 0] EX_MEM_ALUout, EX_MEM_WriteData;
 reg [4 : 0]  EX_MEM_RD;
-reg          EX_MEM_RegWrite, EX_MEM_MemtoReg, EX_MEM_MemRead, EX_MEM_MemWrite, EX_MEM_Branch;
+reg          EX_MEM_RegWrite, EX_MEM_MemtoReg, EX_MEM_MemRead, EX_MEM_MemWrite;
 
 always @ (posedge clk_i) begin
-    if(ALU_o)           EX_MEM_ALUout       <= ALU_o;
-    else                EX_MEM_ALUout       <= 0;
-    if(ALU_RS2)         EX_MEM_WriteData    <= ALU_RS2;
-    else                EX_MEM_WriteData    <= 0;
-    if(ID_EX_RD)        EX_MEM_RD           <= ID_EX_RD;
-    else                EX_MEM_RD           <= 0;
-    if(ID_EX_RegWrite)  EX_MEM_RegWrite     <= ID_EX_RegWrite;
-    else                EX_MEM_RegWrite     <= 0;
-    if(ID_EX_MemtoReg)  EX_MEM_MemtoReg     <= ID_EX_MemtoReg;
-    else                EX_MEM_MemtoReg     <= 0;
-    if(ID_EX_MemRead)    EX_MEM_MemRead      <= ID_EX_MemRead;
-    else                EX_MEM_MemRead      <= 0;
-    if(ID_EX_MemWrite)  EX_MEM_MemWrite     <= ID_EX_MemWrite;
-    else                EX_MEM_MemWrite     <= 0;
-    if(ID_EX_Branch)    EX_MEM_Branch       <= ID_EX_Branch;
-    else                EX_MEM_Branch       <= 0;
+    if(ALU_o)           EX_MEM_ALUout       <= ALU_o;           else    EX_MEM_ALUout       <= 0;
+    if(ALU_RS2)         EX_MEM_WriteData    <= ALU_RS2;         else    EX_MEM_WriteData    <= 0;
+    if(ID_EX_RD)        EX_MEM_RD           <= ID_EX_RD;        else    EX_MEM_RD           <= 0;
+    if(ID_EX_RegWrite)  EX_MEM_RegWrite     <= ID_EX_RegWrite;  else    EX_MEM_RegWrite     <= 0;
+    if(ID_EX_MemtoReg)  EX_MEM_MemtoReg     <= ID_EX_MemtoReg;  else    EX_MEM_MemtoReg     <= 0;
+    if(ID_EX_MemRead)   EX_MEM_MemRead      <= ID_EX_MemRead;   else    EX_MEM_MemRead      <= 0;
+    if(ID_EX_MemWrite)  EX_MEM_MemWrite     <= ID_EX_MemWrite;  else    EX_MEM_MemWrite     <= 0;
 end
 
 
@@ -273,16 +248,11 @@ reg [4 : 0]  MEM_WB_RD;
 reg          MEM_WB_MemtoReg, MEM_WB_RegWrite;
 
 always @ (posedge clk_i) begin
-    if(MemData_o)       MEM_WB_MEMout   <= MemData_o;
-    else                MEM_WB_MEMout   <= 0;
-    if(EX_MEM_ALUout)   MEM_WB_ALUout   <= EX_MEM_ALUout;
-    else                MEM_WB_ALUout   <= 0;
-    if(EX_MEM_RD)       MEM_WB_RD       <= EX_MEM_RD;
-    else                MEM_WB_RD       <= 0;
-    if(EX_MEM_RegWrite) MEM_WB_RegWrite <= EX_MEM_RegWrite;
-    else                MEM_WB_RegWrite <= 0;
-    if(EX_MEM_MemtoReg) MEM_WB_MemtoReg <= EX_MEM_MemtoReg;
-    else                MEM_WB_MemtoReg <= 0;
+    if(MemData_o)       MEM_WB_MEMout   <= MemData_o;       else    MEM_WB_MEMout   <= 0;
+    if(EX_MEM_ALUout)   MEM_WB_ALUout   <= EX_MEM_ALUout;   else    MEM_WB_ALUout   <= 0;
+    if(EX_MEM_RD)       MEM_WB_RD       <= EX_MEM_RD;       else    MEM_WB_RD       <= 0;
+    if(EX_MEM_RegWrite) MEM_WB_RegWrite <= EX_MEM_RegWrite; else    MEM_WB_RegWrite <= 0;
+    if(EX_MEM_MemtoReg) MEM_WB_MemtoReg <= EX_MEM_MemtoReg; else    MEM_WB_MemtoReg <= 0;
 end
 
 //WB stage
@@ -294,10 +264,5 @@ MUX32 WB_Mux(
     .ctrl_signal(MEM_WB_MemtoReg),
     .out(wb_data)
 );
-
-always @ (posedge clk_i) begin
-    //$display("cpu regwrite = %b aluout = %d memwr = %b memwrdata = %d\n", EX_MEM_RegWrite, EX_MEM_ALUout, EX_MEM_MemWrite, EX_MEM_WriteData);
-end
-
 
 endmodule
